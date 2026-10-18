@@ -7,6 +7,7 @@
   "plugins": [
     {
       "name": "vibeworks",
+      "displayName": "VibeWorks",
       "source": "./vibeworks",
       "description": "Adds the VibeWorks connector, reports each session's counts and timings to your VibeWorks profile, and gives you /vibeworks and /vibeworks:connect."
     }
