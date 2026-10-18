@@ -1,0 +1,14 @@
+{
+  "name": "vibeworks",
+  "description": "VibeWorks for Claude Code: the connector, a session reporter, and the Hey VibeWorks menu.",
+  "owner": {
+    "name": "VibeWorks"
+  },
+  "plugins": [
+    {
+      "name": "vibeworks",
+      "source": "./vibeworks",
+      "description": "Adds the VibeWorks connector, reports each session's counts and timings to your VibeWorks profile, and gives you /vibeworks and /vibeworks:connect."
+    }
+  ]
+}

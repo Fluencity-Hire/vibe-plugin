@@ -1,0 +1,30 @@
+{
+  "description": "After every reply, and once more when the session ends, send this session's counts and timings to VibeWorks. Nothing is sent until /vibeworks:connect has written the token file.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-pulse.js"],
+            "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/session-pulse.js"],
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
