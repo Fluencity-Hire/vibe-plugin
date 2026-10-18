@@ -1,7 +1,7 @@
 {
   "name": "vibeworks",
   "displayName": "VibeWorks",
-  "version": "0.1.0",
+  "version": "0.1.3",
   "description": "VibeWorks for Claude Code. Adds the VibeWorks connector, reports each session's counts and timings to your profile (never prompts, code, or file names), and gives you /vibeworks and /vibeworks:connect.",
   "author": {
     "name": "VibeWorks",
