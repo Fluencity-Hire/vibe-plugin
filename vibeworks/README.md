@@ -16,6 +16,10 @@ After every reply, and once more when a session ends, the plugin reads the sessi
 
 It never sends prompts, replies, code, file names, or anything you or Claude wrote.
 
+## Reads, if you turn them on
+
+Say yes to reads when you connect, and the plugin also reads each session for the behaviors behind your score. When a session with three or more prompts ends, it runs one read through your own Claude Code in non-interactive mode: the transcript goes to Anthropic under your account, VibeWorks receives only which of the public codebook's behaviors you showed, each with a note under 25 words. The first time, it reads the last month of sessions on your machine in the background. Claude Code keeps session files for about 30 days (`cleanupPeriodDays` in `~/.claude/settings.json`); raise it to keep older sessions readable. Each read costs tokens of your plan. A session read once is never read again.
+
 Nothing is sent until you connect. Delete `~/.claude/vibeworks/token.json` to stop.
 
 ## Install

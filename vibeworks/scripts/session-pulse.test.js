@@ -128,3 +128,122 @@ test("without a token file nothing is read or sent", () => {
   const out = execFileSync("node", [SCRIPT], { input, env: { ...process.env, VIBEWORKS_TOKEN_FILE: path.join(dir, "none.json") }, encoding: "utf8" });
   assert.equal(out, "");
 });
+
+test("reads a session through the person's own Claude Code and sends only the marks", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibeworks-read-"));
+  const transcriptPath = path.join(dir, "sess-9.jsonl");
+  fs.writeFileSync(
+    transcriptPath,
+    [
+      line({ type: "user", timestamp: "2026-10-18T09:00:05.000Z", message: { role: "user", content: "Draft the plan for the directors" } }),
+      line({ type: "assistant", timestamp: "2026-10-18T09:00:20.000Z", message: { role: "assistant", content: [{ type: "text", text: "Here is a draft." }, { type: "tool_use", name: "Read", input: {} }] } }),
+      line({ type: "user", timestamp: "2026-10-18T09:05:00.000Z", message: { role: "user", content: "Keep it under a page" } }),
+      line({ type: "assistant", timestamp: "2026-10-18T09:05:30.000Z", message: { role: "assistant", content: [{ type: "text", text: "Trimmed." }] } }),
+      line({ type: "user", timestamp: "2026-10-18T09:06:00.000Z", message: { role: "user", content: "Good, shipping this version" } }),
+      line({ type: "assistant", timestamp: "2026-10-18T09:06:10.000Z", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } }),
+    ].join("\n")
+  );
+
+  const prompts = [];
+  const fakeClaude = path.join(dir, "claude");
+  fs.writeFileSync(
+    fakeClaude,
+    "#!/usr/bin/env node\n" +
+      "const fs = require('node:fs');\n" +
+      `fs.writeFileSync(${JSON.stringify(path.join(dir, "prompt.txt"))}, fs.readFileSync(0, 'utf8'));\n` +
+      "const answer = { gate: { task: true, opportunity_to_react: true, checkable_output: false, fix_made: false }, indicators: [{ id: 'D1', observed: true, evidence: 'named the plan for the directors' }], executor_kind: 'none', tags: {}, model_dimension_scores: {}, read_confidence: 0.8, standout: 'Named the reader first.' };\n" +
+      "process.stdout.write(JSON.stringify({ type: 'result', result: '```json\\n' + JSON.stringify(answer) + '\\n```' }));\n"
+  );
+  fs.chmodSync(fakeClaude, 0o755);
+
+  const received = [];
+  const server = http.createServer((request, response) => {
+    let body = "";
+    request.on("data", (chunk) => (body += chunk));
+    request.on("end", () => {
+      received.push({ url: request.url, authorization: request.headers.authorization, body: body && JSON.parse(body) });
+      if (request.url === "/webhooks/claude-code/read-instructions") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ read_instructions: "Mark the indicators.", read_schema: {}, user_template: "<conversation_to_analyze source=\"{{SOURCE}}\">\n{{CONVERSATION}}\n</conversation_to_analyze>" }));
+      } else {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ accepted: 1, dropped: {} }));
+      }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+  const tokenFile = path.join(dir, "token.json");
+  fs.writeFileSync(tokenFile, JSON.stringify({ token: "vwcc_test", url, reads: true }));
+
+  await new Promise((resolve, reject) => {
+    execFile(
+      "node",
+      [SCRIPT, "--read-now", "sess-9", transcriptPath],
+      { env: { ...process.env, VIBEWORKS_TOKEN_FILE: tokenFile, VIBEWORKS_CLAUDE_BIN: fakeClaude }, encoding: "utf8" },
+      (error) => (error ? reject(error) : resolve())
+    );
+  });
+
+  const prompt = fs.readFileSync(path.join(dir, "prompt.txt"), "utf8");
+  assert.match(prompt, /^Mark the indicators\./);
+  assert.match(prompt, /User: Draft the plan for the directors/);
+  assert.match(prompt, /Assistant: Here is a draft\.\n\[used tools: read\]/);
+  assert.match(prompt, /source="Claude Code"/);
+
+  assert.deepEqual(received.map((call) => call.url), ["/webhooks/claude-code/read-instructions", "/webhooks/claude-code/reads"]);
+  const sent = received[1].body;
+  assert.equal(received[1].authorization, "Bearer vwcc_test");
+  assert.equal(sent.session_id, "sess-9");
+  assert.equal(sent.read.conversation_id, "sess-9");
+  assert.equal(sent.read.evidence_source, "full_transcript");
+  assert.equal(sent.read.date_basis, "started");
+  assert.equal(sent.read.started_at, "2026-10-18T09:00:05.000Z");
+  assert.equal(sent.read.tool_calls, 1);
+  assert.equal(sent.read.standout, "Named the reader first.");
+  assert.equal(sent.read.indicators[0].id, "D1");
+  assert.ok(!JSON.stringify(sent).includes("Draft the plan"), "no conversation text reaches VibeWorks");
+  assert.ok(fs.existsSync(path.join(dir, "reads", "sess-9.json")), "a session read once is stamped and never reread");
+
+  received.length = 0;
+  await new Promise((resolve, reject) => {
+    execFile("node", [SCRIPT, "--read-now", "sess-9", transcriptPath], { env: { ...process.env, VIBEWORKS_TOKEN_FILE: tokenFile, VIBEWORKS_CLAUDE_BIN: fakeClaude } }, (error) => (error ? reject(error) : resolve()));
+  });
+  assert.equal(received.length, 0);
+
+  server.close();
+});
+
+test("a session with fewer than three prompts, or a read session itself, is never read", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibeworks-read-"));
+  const short = path.join(dir, "short.jsonl");
+  fs.writeFileSync(short, line({ type: "user", timestamp: "2026-10-18T09:00:05.000Z", message: { role: "user", content: "hi" } }));
+  const nested = path.join(dir, "nested.jsonl");
+  fs.writeFileSync(
+    nested,
+    [1, 2, 3].map((n) => line({ type: "user", timestamp: `2026-10-18T09:0${n}:00.000Z`, message: { role: "user", content: n === 1 ? "Mark these. <conversation_to_analyze source=\"x\">" : "more" } })).join("\n")
+  );
+  const tokenFile = path.join(dir, "token.json");
+  fs.writeFileSync(tokenFile, JSON.stringify({ token: "vwcc_test", url: "http://127.0.0.1:9", reads: true }));
+  const { readLink, readSession } = require("./session-pulse.js");
+  process.env.VIBEWORKS_TOKEN_FILE = tokenFile;
+  const link = readLink();
+  assert.equal(await readSession(link, "short", short), true, "too short to read, and never retried");
+  assert.equal(await readSession(link, "nested", nested), true, "a read session is not evidence of the person's work");
+  delete process.env.VIBEWORKS_TOKEN_FILE;
+});
+
+test("the backfill lists only session files from the last month", () => {
+  const { sessionFiles } = require("./backfill-reads.js");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibeworks-backfill-"));
+  fs.mkdirSync(path.join(dir, "-work-app"));
+  fs.mkdirSync(path.join(dir, "-work-app", "subagents"));
+  const fresh = path.join(dir, "-work-app", "fresh.jsonl");
+  const stale = path.join(dir, "-work-app", "stale.jsonl");
+  fs.writeFileSync(fresh, "");
+  fs.writeFileSync(stale, "");
+  fs.writeFileSync(path.join(dir, "-work-app", "notes.txt"), "");
+  const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+  fs.utimesSync(stale, old, old);
+  assert.deepEqual(sessionFiles(dir, Date.now() - 30 * 24 * 60 * 60 * 1000), [fresh]);
+});

@@ -8,11 +8,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
-const { execFileSync } = require("node:child_process");
+const { execFileSync, spawn } = require("node:child_process");
 
 const HOOK_VERSION = 1;
 const IDLE_SECONDS = 600;
 const SEND_TIMEOUT_MS = 5000;
+const READ_TIMEOUT_MS = 10 * 60 * 1000;
+const READ_MIN_PROMPTS = 3;
+const TURN_CAP_CHARS = 4000;
+const CONVERSATION_CAP_CHARS = 60000;
+const READ_MARKER = "<conversation_to_analyze";
 
 const CONNECTOR_KINDS = {
   analytics: ["amplitude", "mixpanel", "pendo", "posthog", "similarweb", "ga4", "google-analytics"],
@@ -39,6 +44,7 @@ const CONNECTOR_KINDS = {
 const SKIPPED_SERVERS = ["vibeworks", "fluencity"];
 
 function main() {
+  if (process.env.VIBEWORKS_READ === "1") return;
   let input = {};
   try {
     input = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
@@ -58,6 +64,10 @@ function main() {
 
   const facts = sessionFacts(lines);
   if (!facts) return;
+
+  if (link.reads && input.hook_event_name === "SessionEnd" && facts.prompt_count >= READ_MIN_PROMPTS) {
+    startReadInBackground(String(input.session_id), String(input.transcript_path));
+  }
 
   const pulse = {
     ...facts,
@@ -85,9 +95,213 @@ function readLink() {
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     if (typeof parsed.token !== "string" || typeof parsed.url !== "string") return null;
-    return { token: parsed.token, url: parsed.url.replace(/\/+$/, ""), stampDir: path.join(path.dirname(file), "pulses") };
+    return {
+      token: parsed.token,
+      url: parsed.url.replace(/\/+$/, ""),
+      reads: parsed.reads === true,
+      stampDir: path.join(path.dirname(file), "pulses"),
+      readStampDir: path.join(path.dirname(file), "reads"),
+    };
   } catch (_error) {
     return null;
+  }
+}
+
+function startReadInBackground(sessionId, transcriptPath) {
+  try {
+    const child = spawn(process.execPath, [__filename, "--read-now", sessionId, transcriptPath], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, VIBEWORKS_READ: "1" },
+    });
+    child.unref();
+  } catch (_error) {
+  }
+}
+
+async function readSession(link, sessionId, transcriptPath) {
+  if (hasReadStamp(link.readStampDir, sessionId)) return true;
+  let lines;
+  try {
+    lines = fs.readFileSync(transcriptPath, "utf8").split("\n");
+  } catch (_error) {
+    return false;
+  }
+  const facts = sessionFacts(lines);
+  if (!facts || facts.prompt_count < READ_MIN_PROMPTS) return true;
+  const rendered = renderConversation(lines);
+  if (!rendered || rendered.text.includes(READ_MARKER)) return true;
+
+  const instructions = await fetchJson(link, "/webhooks/claude-code/read-instructions");
+  const prompt = buildReadPrompt(instructions, rendered, facts);
+  const answer = runClaudeRead(prompt);
+  if (!answer) return false;
+
+  const read = {
+    ...answer,
+    standout: typeof answer.standout === "string" ? answer.standout.slice(0, 240) : "",
+    started_at: facts.started_at,
+    conversation_id: sessionId,
+    date_basis: "started",
+    evidence_source: rendered.truncated ? "partial_transcript" : "full_transcript",
+    pages_read: 1,
+    truncated: rendered.truncated,
+    tool_calls: facts.tool_calls,
+    connector_kinds: Object.keys(facts.connector_kinds),
+    skills: facts.skill_count,
+    subagents: facts.subagent_count,
+    scheduled: false,
+  };
+
+  const status = await post(link, "/webhooks/claude-code/reads", { session_id: sessionId, read });
+  if (status === 200 || status === 422) {
+    rememberRead(link.readStampDir, sessionId, status);
+    return true;
+  }
+  return false;
+}
+
+function renderConversation(lines) {
+  const turns = [];
+  let userTurns = 0;
+  let assistantTurns = 0;
+  for (const raw of lines) {
+    if (!raw.trim()) continue;
+    let line;
+    try {
+      line = JSON.parse(raw);
+    } catch (_error) {
+      continue;
+    }
+    if (line.isSidechain === true) continue;
+    if (line.type === "user" && line.isMeta !== true) {
+      const text = promptText(line.message && line.message.content);
+      if (text === null || text.startsWith("<")) continue;
+      userTurns += 1;
+      turns.push("User: " + text.slice(0, TURN_CAP_CHARS));
+      continue;
+    }
+    if (line.type === "assistant") {
+      const content = Array.isArray(line.message && line.message.content) ? line.message.content : [];
+      const words = content.filter((block) => block && block.type === "text" && typeof block.text === "string").map((block) => block.text);
+      const tools = content.filter((block) => block && block.type === "tool_use" && typeof block.name === "string").map((block) => toolKind(block.name));
+      const parts = [];
+      if (words.length > 0) parts.push(words.join("\n").slice(0, TURN_CAP_CHARS));
+      if (tools.length > 0) parts.push("[used tools: " + Array.from(new Set(tools)).sort().join(", ") + "]");
+      if (parts.length === 0) continue;
+      assistantTurns += 1;
+      turns.push("Assistant: " + parts.join("\n"));
+    }
+  }
+  if (turns.length === 0) return null;
+  let text = turns.join("\n\n");
+  let truncated = false;
+  if (text.length > CONVERSATION_CAP_CHARS) {
+    const half = Math.floor(CONVERSATION_CAP_CHARS / 2);
+    text = text.slice(0, half) + "\n\n[... middle of the conversation left out ...]\n\n" + text.slice(text.length - half);
+    truncated = true;
+  }
+  return { text, truncated, userTurns, assistantTurns };
+}
+
+function buildReadPrompt(instructions, rendered, facts) {
+  const user = String(instructions.user_template || "{{CONVERSATION}}")
+    .replace("{{SOURCE}}", "Claude Code")
+    .replace("{{STARTED_AT}}", facts.started_at.slice(0, 10))
+    .replace("{{MESSAGE_COUNT}}", String(rendered.userTurns + rendered.assistantTurns))
+    .replace("{{USER_TURNS}}", String(rendered.userTurns))
+    .replace("{{ASSISTANT_TURNS}}", String(rendered.assistantTurns))
+    .replace("{{CONVERSATION}}", rendered.text);
+  return (
+    String(instructions.read_instructions || "") +
+    "\n\nAlso add one more field to the object: standout, one behavior of the person that stood out, under 25 words, no names, no quotes.\n\n" +
+    user
+  );
+}
+
+function runClaudeRead(prompt) {
+  let output;
+  try {
+    output = execFileSync(process.env.VIBEWORKS_CLAUDE_BIN || "claude", ["-p", "--output-format", "json"], {
+      input: prompt,
+      encoding: "utf8",
+      timeout: READ_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env, VIBEWORKS_READ: "1" },
+      stdio: ["pipe", "pipe", "ignore"],
+    });
+  } catch (_error) {
+    return null;
+  }
+  return parseAnswer(output);
+}
+
+function parseAnswer(output) {
+  let envelope;
+  try {
+    envelope = JSON.parse(output);
+  } catch (_error) {
+    return null;
+  }
+  const text = typeof envelope.result === "string" ? envelope.result : envelope && Array.isArray(envelope.indicators) ? JSON.stringify(envelope) : null;
+  if (!text) return null;
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start < 0 || end < start) return null;
+  try {
+    const parsed = JSON.parse(text.slice(start, end + 1));
+    return parsed && Array.isArray(parsed.indicators) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function fetchJson(link, route) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS * 4);
+  try {
+    const response = await fetch(`${link.url}${route}`, {
+      headers: { Authorization: `Bearer ${link.token}` },
+      signal: controller.signal,
+    });
+    if (!response.ok) throw new Error(`VibeWorks answered ${response.status}`);
+    return await response.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function post(link, route, body) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SEND_TIMEOUT_MS * 4);
+  try {
+    const response = await fetch(`${link.url}${route}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${link.token}` },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    return response.status;
+  } catch (_error) {
+    return 0;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function readStampPath(readStampDir, sessionId) {
+  return path.join(readStampDir, `${sessionId.replace(/[^A-Za-z0-9_-]/g, "_")}.json`);
+}
+
+function hasReadStamp(readStampDir, sessionId) {
+  return fs.existsSync(readStampPath(readStampDir, sessionId));
+}
+
+function rememberRead(readStampDir, sessionId, status) {
+  try {
+    fs.mkdirSync(readStampDir, { recursive: true });
+    fs.writeFileSync(readStampPath(readStampDir, sessionId), JSON.stringify({ status, at: new Date().toISOString() }));
+  } catch (_error) {
   }
 }
 
@@ -326,7 +540,17 @@ async function send(link, pulse) {
 }
 
 if (require.main === module) {
-  main();
+  if (process.argv[2] === "--read-now") {
+    const link = readLink();
+    if (link) {
+      readSession(link, String(process.argv[3]), String(process.argv[4])).then(
+        () => {},
+        () => {}
+      );
+    }
+  } else {
+    main();
+  }
 }
 
-module.exports = { sessionFacts, toolKind, connectorServer, connectorCategory, activeClock };
+module.exports = { sessionFacts, toolKind, connectorServer, connectorCategory, activeClock, readLink, readSession, renderConversation, parseAnswer };
