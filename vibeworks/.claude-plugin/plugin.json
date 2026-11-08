@@ -1,8 +1,8 @@
 {
   "name": "vibeworks",
   "displayName": "VibeWorks",
-  "version": "0.1.5",
-  "description": "VibeWorks for Claude Code. Adds the VibeWorks connector, reports each session's counts and timings to your profile (never prompts, code, or file names), and gives you /vibeworks and /vibeworks:connect.",
+  "version": "0.1.6",
+  "description": "VibeWorks for Claude Code. Adds the VibeWorks connector, reports each session's counts and timings to your profile (never prompts, code, or file names), and gives you /vibeworks, /vibeworks:connect and /vibeworks:screens.",
   "author": {
     "name": "VibeWorks",
     "url": "https://getvibeworks.ai"

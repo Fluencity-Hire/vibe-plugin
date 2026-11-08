@@ -22,6 +22,10 @@ Say yes to reads when you connect, and the plugin also reads each session for th
 
 Nothing is sent until you connect. Delete `~/.claude/vibeworks/token.json` to stop.
 
+## Screenshots, when you ask
+
+Say "send screenshots to VibeWorks" or run `/vibeworks:screens`. Claude Code photographs the app running on your machine with whatever browser tool it has, writes a title and a line for each picture, shows you the list, and sends only those pictures and words to your project page. They land on a draft page at once and wait as suggestions on a published page. Nothing else from your machine goes with them.
+
 ## Install
 
 From a marketplace that lists it:
@@ -42,9 +46,10 @@ Then, inside Claude Code:
 1. `/mcp`, pick VibeWorks, and sign in.
 2. `/vibeworks:connect` and say yes when it shows you the file it will write.
 3. `/vibeworks:menu` any time to see what else you can do.
+4. `/vibeworks:screens` to send real screenshots of the app to your project page.
 
 ## Test the reporter
 
 ```
-node --test plugin/vibeworks/scripts
+node --test "plugin/vibeworks/scripts/*.test.js"
 ```
