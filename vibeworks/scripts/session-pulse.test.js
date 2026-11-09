@@ -233,6 +233,62 @@ test("a session with fewer than three prompts, or a read session itself, is neve
   delete process.env.VIBEWORKS_TOKEN_FILE;
 });
 
+test("with reads on, the first reply starts the month-back catch-up on its own, and only once", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibeworks-catchup-"));
+  const configDir = path.join(dir, "config");
+  const projectDir = path.join(configDir, "projects", "-work-app");
+  fs.mkdirSync(projectDir, { recursive: true });
+  const older = path.join(projectDir, "older-session.jsonl");
+  fs.writeFileSync(
+    older,
+    [
+      line({ type: "user", timestamp: "2026-10-10T09:00:00.000Z", message: { role: "user", content: "Plan the page" } }),
+      line({ type: "assistant", timestamp: "2026-10-10T09:01:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } }),
+      line({ type: "user", timestamp: "2026-10-10T09:02:00.000Z", message: { role: "user", content: "Now the form" } }),
+      line({ type: "assistant", timestamp: "2026-10-10T09:03:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } }),
+      line({ type: "user", timestamp: "2026-10-10T09:04:00.000Z", message: { role: "user", content: "Ship it" } }),
+      line({ type: "assistant", timestamp: "2026-10-10T09:05:00.000Z", message: { role: "assistant", content: [{ type: "text", text: "Done." }] } }),
+    ].join("\n")
+  );
+  const transcriptPath = path.join(dir, "current.jsonl");
+  fs.writeFileSync(transcriptPath, transcript());
+
+  const asked = [];
+  const server = http.createServer((request, response) => {
+    asked.push(request.url);
+    request.resume();
+    request.on("end", () => response.writeHead(request.url.endsWith("/read-instructions") ? 403 : 204).end());
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}`;
+
+  const tokenFile = path.join(dir, "token.json");
+  fs.writeFileSync(tokenFile, JSON.stringify({ reads: true, token: "vwcc_test", url }));
+
+  const input = JSON.stringify({ session_id: "sess-now", transcript_path: transcriptPath, cwd: dir, hook_event_name: "Stop" });
+  const env = { ...process.env, CLAUDE_CONFIG_DIR: configDir, VIBEWORKS_TOKEN_FILE: tokenFile };
+  const run = () =>
+    new Promise((resolve, reject) => {
+      const child = execFile("node", [SCRIPT], { env, encoding: "utf8" }, (error, stdout) => (error ? reject(error) : resolve(stdout)));
+      child.stdin.end(input);
+    });
+
+  await run();
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.ok(fs.existsSync(path.join(dir, "backfill-started.json")), "the catch-up records that it started");
+  assert.equal(
+    asked.filter((url) => url === "/webhooks/claude-code/read-instructions").length,
+    1,
+    "the plugin starts the catch-up from its own folder; a command Claude runs from chat cannot find it"
+  );
+
+  await run();
+  await new Promise((resolve) => setTimeout(resolve, 800));
+  assert.equal(asked.filter((url) => url === "/webhooks/claude-code/read-instructions").length, 1, "the catch-up runs once");
+
+  server.close();
+});
+
 test("the backfill lists only session files from the last month", () => {
   const { sessionFiles } = require("./backfill-reads.js");
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "vibeworks-backfill-"));

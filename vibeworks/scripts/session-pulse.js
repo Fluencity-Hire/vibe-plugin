@@ -65,6 +65,8 @@ function main() {
   const facts = sessionFacts(lines);
   if (!facts) return;
 
+  if (link.reads) startBackfillOnce(link);
+
   if (link.reads && input.hook_event_name === "SessionEnd" && facts.prompt_count >= READ_MIN_PROMPTS) {
     startReadInBackground(String(input.session_id), String(input.transcript_path));
   }
@@ -101,6 +103,7 @@ function readLink() {
       reads: parsed.reads === true,
       stampDir: path.join(path.dirname(file), "pulses"),
       readStampDir: path.join(path.dirname(file), "reads"),
+      backfillStamp: path.join(path.dirname(file), "backfill-started.json"),
     };
   } catch (_error) {
     return null;
@@ -110,6 +113,20 @@ function readLink() {
 function startReadInBackground(sessionId, transcriptPath) {
   try {
     const child = spawn(process.execPath, [__filename, "--read-now", sessionId, transcriptPath], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, VIBEWORKS_READ: "1" },
+    });
+    child.unref();
+  } catch (_error) {
+  }
+}
+
+function startBackfillOnce(link) {
+  if (fs.existsSync(link.backfillStamp)) return;
+  try {
+    fs.writeFileSync(link.backfillStamp, JSON.stringify({ at: new Date().toISOString() }));
+    const child = spawn(process.execPath, [path.join(__dirname, "backfill-reads.js")], {
       detached: true,
       stdio: "ignore",
       env: { ...process.env, VIBEWORKS_READ: "1" },
