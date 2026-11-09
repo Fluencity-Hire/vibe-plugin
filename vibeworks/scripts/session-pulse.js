@@ -326,6 +326,7 @@ function sessionFacts(lines) {
   const prompts = [];
   const tools = { agent: 0, connector: 0, edit: 0, other: 0, plan: 0, question: 0, read: 0, shell: 0, skill: 0, web: 0 };
   const connectorKinds = {};
+  const connectorCalls = {};
   const connectorServers = new Set();
   let commandCount = 0;
   let compactionCount = 0;
@@ -368,6 +369,9 @@ function sessionFacts(lines) {
         tools[kind] += 1;
         if (kind === "connector") {
           const server = connectorServer(block.name);
+          if (server && !SKIPPED_SERVERS.includes(server)) {
+            connectorCalls[server] = (connectorCalls[server] || 0) + 1;
+          }
           if (server && !SKIPPED_SERVERS.includes(server) && !connectorServers.has(server)) {
             connectorServers.add(server);
             const category = connectorCategory(server);
@@ -393,6 +397,7 @@ function sessionFacts(lines) {
     tool_calls: toolCalls,
     tools,
     connector_kinds: connectorKinds,
+    connector_calls: connectorCalls,
     skill_count: tools.skill,
     subagent_count: tools.agent,
     compaction_count: compactionCount,
@@ -450,9 +455,6 @@ function toolKind(name) {
   }
 }
 
-// mcp__<server>__<tool>, or mcp__plugin_<plugin>_<server>__<tool> for a
-// plugin-bundled server. Only the server name is read, and only to pick a
-// kind; the name never leaves the machine.
 function connectorServer(name) {
   const match = /^mcp__(.+?)__/.exec(name);
   if (!match) return null;

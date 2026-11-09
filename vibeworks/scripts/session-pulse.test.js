@@ -44,6 +44,7 @@ test("reads counts, kinds and the clock off a transcript, and nothing else", () 
   assert.equal(facts.tool_calls, 12);
   assert.deepEqual(facts.tools, { agent: 1, connector: 4, edit: 1, other: 0, plan: 0, question: 1, read: 2, shell: 2, skill: 1, web: 0 });
   assert.deepEqual(facts.connector_kinds, { chat: 1, code: 1 }, "github once, slack once, VibeWorks itself skipped");
+  assert.deepEqual(facts.connector_calls, { github: 2, slack: 1 }, "calls counted per connector by name, VibeWorks itself skipped");
   assert.equal(facts.skill_count, 1);
   assert.equal(facts.subagent_count, 1);
   assert.equal(facts.compaction_count, 1);
