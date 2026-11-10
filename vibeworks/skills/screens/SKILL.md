@@ -1,6 +1,6 @@
 ---
 name: screens
-description: Photograph the app the person is building, on their own machine, and send the pictures to their VibeWorks project page. Use when they ask to send screenshots, screens or pictures of the app to VibeWorks, or to photograph the app for VibeWorks.
+description: Photograph the app the person is building, on their own machine, and send only the pictures to their VibeWorks project page. Use when they ask to send screenshots, screens or pictures of the app to VibeWorks, or to photograph the app for VibeWorks. To send the whole project, or clips for its video, use the upload skill.
 ---
 
 Take real screenshots of the app running here and send them to the person's VibeWorks project page. Only the pictures and the words you write for them leave this machine.

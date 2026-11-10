@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "vibeworks": {
+      "type": "http",
+      "url": "https://getvibeworks.ai/mcp"
+    }
+  }
+}

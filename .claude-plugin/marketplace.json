@@ -9,7 +9,7 @@
       "name": "vibeworks",
       "displayName": "VibeWorks",
       "source": "./vibeworks",
-      "description": "Adds the VibeWorks connector, reports each session's counts and timings to your VibeWorks profile, and gives you /vibeworks and /vibeworks:connect."
+      "description": "Adds the VibeWorks connector, uploads a project with clips of it in use in one ask, reports each session's counts and timings to your VibeWorks profile, and gives you /vibeworks:menu, /vibeworks:upload, /vibeworks:connect and /vibeworks:screens."
     }
   ]
 }

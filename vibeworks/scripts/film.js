@@ -17,17 +17,20 @@ const gotoTimeoutMs = 20_000;
 const actTimeoutMs = 6000;
 const waitForCapMs = 30_000;
 const cursorMoveMs = 550;
-const typeDelayMs = 30;
+const typeDelayMs = 45;
 const typeOnCameraChars = 60;
 const leadSeconds = 0.15;
 const windowCapSeconds = 3.5;
 const holdSeconds = 1.5;
-const typeSpeed = 2.5;
+const typeSpeed = 1.5;
 const waitSpeed = 2;
 const payoffSeconds = 2.4;
 const endMarginSeconds = 0.3;
 const clipBudgetSeconds = 7;
 const clipFloorSeconds = 2;
+const windowCap = 14;
+const shotSecondsCap = 110;
+const resizeMarginMs = 1500;
 
 function parseArgs(argv) {
   const args = {};
@@ -81,6 +84,7 @@ function setup() {
   fs.mkdirSync(home, { recursive: true });
   const npm = process.platform === "win32" ? "npm.cmd" : "npm";
   execFileSync(npm, ["install", "--prefix", home, "--no-audit", "--no-fund", `playwright-core@${PLAYWRIGHT_VERSION}`], {
+    shell: process.platform === "win32",
     stdio: "ignore",
   });
   const cli = path.join(home, "node_modules", "playwright-core", "cli.js");
@@ -100,7 +104,7 @@ async function setupBrowser(cli) {
   }
 }
 
-function readPlan(file) {
+function readPlan(file, looking = false) {
   let plan;
   try {
     plan = JSON.parse(fs.readFileSync(file, "utf8"));
@@ -114,7 +118,8 @@ function readPlan(file) {
     throw new Error("The plan needs a base address, such as http://localhost:3000");
   }
   if (!["http:", "https:"].includes(base.protocol)) throw new Error("The base address must start with http or https");
-  if (!Array.isArray(plan.shots) || plan.shots.length === 0) throw new Error("The plan needs at least one shot");
+  if (looking) plan.shots = [];
+  if (!Array.isArray(plan.shots) || (plan.shots.length === 0 && !looking)) throw new Error("The plan needs at least one shot");
   if (plan.shots.length > SHOT_CAP) throw new Error(`At most ${SHOT_CAP} shots; the plan lists ${plan.shots.length}`);
   const names = new Set();
   const shots = plan.shots.map((shot, index) => {
@@ -126,10 +131,12 @@ function readPlan(file) {
     names.add(name);
     const steps = Array.isArray(shot.steps) ? shot.steps : [];
     if (steps.length > STEP_CAP) throw new Error(`Shot ${name} has ${steps.length} steps; keep it to ${STEP_CAP}`);
+    const route = String(shot.path || "/");
+    if (!route.startsWith("/")) throw new Error(`Shot ${name}: the path must start with "/", such as "/tasks"`);
     return {
       caption: String(shot.caption || "").trim().slice(0, 200),
       name,
-      path: String(shot.path || "/"),
+      path: route,
       steps,
       title: String(shot.title || "").trim().slice(0, 60),
     };
@@ -147,7 +154,7 @@ const fraction = (value, span) => Math.round(Math.max(0, Math.min(1, value / spa
 const outputSeconds = ([from, to, speed]) => (to - from) / speed;
 
 function chosenWindows(recorded, captureAt) {
-  const segments = recorded.map(({ from, to, speed }) => [from, Math.min(to, from + windowCapSeconds * speed), speed]);
+  const segments = recorded.map(({ from, to, speed }) => [Math.max(from, to - windowCapSeconds * speed), to, speed]);
   if (segments.length) {
     const lastTo = segments[segments.length - 1][1];
     const holdTo = Math.min(lastTo + holdSeconds, captureAt - endMarginSeconds);
@@ -155,18 +162,22 @@ function chosenWindows(recorded, captureAt) {
   }
   const kept = [];
   let total = 0;
+  let trimmed = false;
   for (let i = segments.length - 1; i >= 0; i -= 1) {
     const [from, to, speed] = segments[i];
     const length = outputSeconds(segments[i]);
     if (length < 0.25) continue;
-    if (total + length > clipBudgetSeconds) {
+    if (total + length > clipBudgetSeconds || kept.length >= windowCap) {
       if (kept.length === 0) kept.unshift([to - clipBudgetSeconds * speed, to, speed]);
+      trimmed = true;
       break;
     }
     kept.unshift([from, to, speed]);
     total += length;
   }
-  return kept.map(([from, to, speed]) => [round2(from), round2(to), speed]);
+  const windows = kept.map(([from, to, speed]) => [round2(from), round2(to), speed]);
+  windows.trimmed = trimmed;
+  return windows;
 }
 
 function locate(page, target) {
@@ -206,13 +217,17 @@ async function onPage(page) {
         const style = getComputedStyle(el);
         return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
       };
-      const name = (el) =>
-        String(
-          el.getAttribute("aria-label") || el.innerText || el.value || el.getAttribute("placeholder") || el.getAttribute("name") || "",
+      const name = (el) => {
+        const byId = el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        const wrapped = el.closest("label");
+        return String(
+          el.getAttribute("aria-label") || (byId && byId.innerText) || (wrapped && wrapped.innerText) || el.innerText ||
+            el.getAttribute("placeholder") || el.getAttribute("name") || "",
         )
           .replace(/\s+/g, " ")
           .trim()
           .slice(0, 60);
+      };
       const selector = "a[href], button, [role=button], [role=tab], [role=link], input:not([type=hidden]), textarea, select";
       return {
         elements: Array.from(document.querySelectorAll(selector))
@@ -261,7 +276,7 @@ function pointer(page) {
       })
       .catch(() => {});
 
-  const glide = async (x, y, ms = cursorMoveMs) => {
+  const glide = async (x, y, ms = cursorMoveMs, mouse = true) => {
     await ensure();
     await page
       .evaluate(
@@ -274,10 +289,12 @@ function pointer(page) {
         { x, y, ms },
       )
       .catch(() => {});
-    await page.mouse.move(x, y).catch(() => {});
+    if (mouse) await page.mouse.move(x, y).catch(() => {});
     await page.waitForTimeout(ms);
     at = { x, y };
   };
+
+  const park = () => page.mouse.move(desktop.width - 2, desktop.height - 2).catch(() => {});
 
   const ripple = (x, y) =>
     page
@@ -286,7 +303,8 @@ function pointer(page) {
         ring.setAttribute("aria-hidden", "true");
         ring.style.cssText =
           `position:fixed;left:${x - 18}px;top:${y - 18}px;width:36px;height:36px;border-radius:999px;` +
-          "border:3px solid #fd108e;z-index:2147483646;pointer-events:none;opacity:0.9;transform:scale(0.4);" +
+          "border:3px solid #fd108e;box-shadow:0 0 0 2px rgba(255,255,255,0.95),inset 0 0 0 2px rgba(255,255,255,0.95);" +
+          "z-index:2147483646;pointer-events:none;opacity:0.9;transform:scale(0.4);" +
           "transition:transform 0.45s ease-out, opacity 0.45s ease-out;";
         document.documentElement.appendChild(ring);
         requestAnimationFrame(() => {
@@ -317,7 +335,7 @@ function pointer(page) {
     return { x: fraction(x, desktop.width), y: fraction(y, desktop.height) };
   };
 
-  return { centre, ensure, glide, hide, press, to };
+  return { centre, ensure, glide, hide, park, press, to };
 }
 
 async function perform(page, hand, step, shift, base) {
@@ -328,6 +346,7 @@ async function perform(page, hand, step, shift, base) {
       await element.click({ timeout: actTimeoutMs });
       shift(waitSpeed);
       await settle(page);
+      await hand.ensure();
       return focus;
     }
     case "type": {
@@ -348,6 +367,7 @@ async function perform(page, hand, step, shift, base) {
       await page.keyboard.press(String(step.key || "Enter"));
       shift(waitSpeed);
       await settle(page);
+      await hand.ensure();
       return null;
     }
     case "hover": {
@@ -370,7 +390,7 @@ async function perform(page, hand, step, shift, base) {
       await page.mouse.move(from.x, from.y);
       await page.mouse.down();
       await page.waitForTimeout(150);
-      const moving = hand.glide(target.x, target.y, 900);
+      const moving = hand.glide(target.x, target.y, 900, false);
       await page.mouse.move(target.x, target.y, { steps: 28 });
       await moving;
       await page.waitForTimeout(300);
@@ -446,9 +466,19 @@ function stepFailure(shot, index, error, seen) {
   return failure;
 }
 
+async function newContext(browser, plan, options) {
+  const context = await browser.newContext({ viewport: desktop, ignoreHTTPSErrors: true, ...options });
+  if (plan.headers) {
+    await context.route(`${new URL(plan.base).origin}/**`, (route) =>
+      route.continue({ headers: { ...route.request().headers(), ...plan.headers } }),
+    );
+  }
+  return context;
+}
+
 async function prepare(browser, plan, out) {
   if (!plan.before) return null;
-  const context = await browser.newContext({ viewport: desktop, extraHTTPHeaders: plan.headers || undefined, ignoreHTTPSErrors: true });
+  const context = await newContext(browser, plan, {});
   const page = await context.newPage();
   const hand = pointer(page);
   const shot = { name: "before" };
@@ -473,13 +503,10 @@ async function filmShot(browser, plan, shot, out, state) {
   const recordDir = path.join(out, "rec", shot.name);
   fs.rmSync(recordDir, { recursive: true, force: true });
   fs.mkdirSync(recordDir, { recursive: true });
-  const context = await browser.newContext({
-    viewport: desktop,
+  const context = await newContext(browser, plan, {
     recordVideo: { dir: recordDir, size: desktop },
     reducedMotion: "no-preference",
-    extraHTTPHeaders: plan.headers || undefined,
     storageState: state || undefined,
-    ignoreHTTPSErrors: true,
   });
   const startedAt = Date.now();
   const seconds = () => (Date.now() - startedAt) / 1000;
@@ -487,13 +514,22 @@ async function filmShot(browser, plan, shot, out, state) {
   page.on("dialog", (dialog) => dialog.dismiss().catch(() => {}));
   const hand = pointer(page);
   const windows = [];
+  const frames = [];
   let filmedShot = null;
+
+  const frame = async (label) => {
+    const file = `${shot.name}-${label}.jpg`;
+    await page.screenshot({ path: path.join(out, file), type: "jpeg", quality: 60 }).catch(() => {});
+    if (fs.existsSync(path.join(out, file))) frames.push(file);
+  };
 
   try {
     await open(page, plan.base + shot.path);
     await hand.ensure();
     await page.waitForTimeout(300);
-    let readyAt = seconds();
+    const readyAt = seconds();
+    await frame("open");
+    let lastFocus = null;
 
     for (let index = 0; index < shot.steps.length; index += 1) {
       const previous = windows.length ? windows[windows.length - 1].to : readyAt;
@@ -515,13 +551,24 @@ async function filmShot(browser, plan, shot, out, state) {
       const to = seconds();
       if (to > from) segments.push({ from, to, speed });
       segments.forEach((segment, i) => windows.push({ ...segment, focus: i === 0 ? focus || null : null }));
+      if (focus) lastFocus = focus;
+      if (index < shot.steps.length - 1) await frame(`step${index + 1}`);
     }
 
+    if (lastFocus) {
+      const aside = {
+        x: Math.min(lastFocus.x * desktop.width + 70, desktop.width - 20),
+        y: Math.min(lastFocus.y * desktop.height + 60, desktop.height - 20),
+      };
+      await hand.glide(aside.x, aside.y, 300, false);
+    }
     await page.waitForTimeout(Math.round((holdSeconds + endMarginSeconds) * 1000));
     const captureAt = seconds();
     const actionWindows = chosenWindows(windows, captureAt);
     const actionSeconds = actionWindows.reduce((sum, window) => sum + outputSeconds(window), 0);
     const focus = [...windows].reverse().map((entry) => entry.focus).find(Boolean) || null;
+    const lastStep = shot.steps[shot.steps.length - 1];
+    const endsOnAnswer = Boolean(lastStep && lastStep.do === "wait" && lastStep.for);
 
     await hand.hide();
     const desktopFile = `${shot.name}.jpg`;
@@ -529,22 +576,27 @@ async function filmShot(browser, plan, shot, out, state) {
     await page.screenshot({ path: path.join(out, desktopFile), type: "jpeg", quality: 85 });
     await hand.ensure();
 
-    let clipWindows = actionWindows;
+    let clipWindows = [...actionWindows];
     if (actionSeconds < clipFloorSeconds) {
       const clipStart = seconds();
       await hand.hide();
+      await hand.park();
       await glideDown(page);
-      clipWindows = [[round2(clipStart), round2(seconds()), 1]];
-    } else if (actionSeconds + payoffSeconds <= clipBudgetSeconds) {
+      clipWindows = [[round2(clipStart), round2(Math.min(seconds(), clipStart + clipBudgetSeconds)), 1]];
+    } else if (!endsOnAnswer && actionSeconds + payoffSeconds <= clipBudgetSeconds) {
       const payoffStart = seconds();
+      await hand.hide();
+      await hand.park();
       const top = await payoff(page);
       if (top !== null) {
         const payoffEnd = Math.min(seconds(), payoffStart + clipBudgetSeconds - actionSeconds);
         clipWindows = [...actionWindows, [round2(payoffStart), round2(payoffEnd), 1]];
+        await frame("scrolled");
         await page.evaluate((y) => window.scrollTo({ top: y }), top);
       }
     }
-    await page.waitForTimeout(400);
+    if (seconds() > shotSecondsCap) throw new Error(`the shot ran past ${shotSecondsCap} seconds; give it fewer steps or shorter waits`);
+    await page.waitForTimeout(resizeMarginMs);
 
     await hand.hide();
     let phoneShot = null;
@@ -561,12 +613,17 @@ async function filmShot(browser, plan, shot, out, state) {
       caption: shot.caption,
       desktop: desktopFile,
       focus: actionSeconds < clipFloorSeconds ? null : focus,
+      frames,
       name: shot.name,
       phone: phoneShot,
       seconds: round2(clipWindows.reduce((sum, window) => sum + outputSeconds(window), 0)),
       title: shot.title,
+      trimmed: actionWindows.trimmed === true,
       windows: clipWindows,
     };
+  } catch (error) {
+    if (!error.report) error.report = { on_page: await onPage(page), shot: shot.name, step: null };
+    throw error;
   } finally {
     const video = page.video();
     await context.close();
@@ -576,26 +633,33 @@ async function filmShot(browser, plan, shot, out, state) {
       filmedShot.video = recording;
     }
     fs.rmSync(recordDir, { recursive: true, force: true });
+    if (!filmedShot) frames.forEach((file) => fs.rmSync(path.join(out, file), { force: true }));
   }
   return filmedShot;
 }
 
 async function contactSheet(browser, out, shots) {
-  const context = await browser.newContext({ viewport: { width: 1320, height: 200 } });
+  const context = await browser.newContext({ deviceScaleFactor: 2, viewport: { width: 1600, height: 200 } });
   const page = await context.newPage();
   try {
-    const cells = shots
+    const picture = (file) => `data:image/jpeg;base64,${fs.readFileSync(path.join(out, file)).toString("base64")}`;
+    const rows = shots
       .map((shot) => {
-        const data = fs.readFileSync(path.join(out, shot.desktop)).toString("base64");
         const label = `${shot.name}: ${shot.title}`.replace(/[<&]/g, " ");
-        return `<figure><img src="data:image/jpeg;base64,${data}"><figcaption>${label}</figcaption></figure>`;
+        const between = (shot.frames || []).slice(1).slice(-2);
+        const moments = [(shot.frames || [])[0], ...between, shot.desktop]
+          .filter((file) => file && fs.existsSync(path.join(out, file)))
+          .map((file) => `<img src="${picture(file)}">`)
+          .join("");
+        const phoneStill = shot.phone && fs.existsSync(path.join(out, shot.phone)) ? `<img class="phone" src="${picture(shot.phone)}">` : "";
+        return `<section><h2>${label}</h2><div>${moments}${phoneStill}</div></section>`;
       })
       .join("");
     await page.setContent(
-      `<html><body style="margin:0;padding:12px;background:#111;display:grid;grid-template-columns:repeat(3,1fr);gap:12px;font:14px sans-serif;color:#fff">` +
-        `<style>figure{margin:0}img{width:100%;display:block;border:1px solid #333}figcaption{padding:4px 0}</style>${cells}</body></html>`,
+      `<html><body style="margin:0;padding:12px;background:#111;font:14px sans-serif;color:#fff">` +
+        `<style>section{margin:0 0 14px}h2{font-size:15px;margin:0 0 4px}div{display:flex;gap:8px}img{width:22%;border:1px solid #333;align-self:flex-start}img.phone{width:6.5%}</style>${rows}</body></html>`,
     );
-    await page.screenshot({ path: path.join(out, "contact.jpg"), type: "jpeg", quality: 70, fullPage: true });
+    await page.screenshot({ path: path.join(out, "contact.jpg"), type: "jpeg", quality: 72, fullPage: true });
     return "contact.jpg";
   } finally {
     await context.close();
@@ -617,6 +681,7 @@ async function film(args) {
   const wanted = typeof args.shot === "string" ? plan.shots.filter((shot) => shot.name === args.shot) : plan.shots;
   if (wanted.length === 0) throw new Error(`The plan has no shot named ${args.shot}`);
   fs.mkdirSync(out, { recursive: true });
+  fs.writeFileSync(path.join(out, ".gitignore"), "*\n");
 
   const playwright = loadPlaywright();
   if (!playwright) return { status: "needs_setup", next_step: "Run this script once with --setup, then film again." };
@@ -630,42 +695,106 @@ async function film(args) {
   try {
     const state = await prepare(browser, plan, out);
     const filmed = [];
-    for (const shot of wanted) filmed.push(await filmShot(browser, plan, shot, out, state));
-    const kept = readManifest(out).shots.filter((old) => !filmed.some((shot) => shot.name === old.name));
+    const failed = [];
+    for (const shot of wanted) {
+      try {
+        filmed.push(await filmShot(browser, plan, shot, out, state));
+      } catch (error) {
+        if (/ffmpeg/i.test(String(error && error.message))) throw error;
+        failed.push({ error: String(error && error.message ? error.message : error).split("\n")[0], ...error.report });
+      }
+    }
     const order = plan.shots.map((shot) => shot.name);
+    const redone = [...filmed, ...failed].map((shot) => shot.name || shot.shot);
+    const kept = readManifest(out).shots.filter((old) => !redone.includes(old.name));
     const shots = [...kept, ...filmed]
       .filter((shot) => order.includes(shot.name))
       .sort((a, b) => order.indexOf(a.name) - order.indexOf(b.name));
-    const contact = await contactSheet(browser, out, shots);
-    fs.rmSync(path.join(out, "rec"), { recursive: true, force: true });
+    const contact = shots.length ? await contactSheet(browser, out, shots) : null;
     fs.writeFileSync(path.join(out, "film.json"), JSON.stringify({ contact, shots }, null, 2));
-    return {
-      contact: path.join(out, contact),
-      shots: shots.map(({ desktop: still, name, seconds, title }) => ({ name, seconds, still: path.join(out, still), title })),
-      status: "filmed",
+    const named = new Set(shots.flatMap((shot) => [shot.desktop, shot.phone, shot.video, ...(shot.frames || [])]));
+    for (const file of fs.readdirSync(out)) {
+      if (/\.(jpg|webm)$/.test(file) && file !== "contact.jpg" && !named.has(file)) fs.rmSync(path.join(out, file), { force: true });
+    }
+    const report = {
+      contact: contact && path.join(out, contact),
+      missing: order.filter((name) => !shots.some((shot) => shot.name === name)),
+      shots: shots.map(({ desktop: still, frames: moments, name, phone: phoneStill, seconds: played, title, trimmed }) => ({
+        name,
+        opens_on: moments && moments[0] ? path.join(out, moments[0]) : null,
+        phone: phoneStill ? path.join(out, phoneStill) : null,
+        seconds: played,
+        still: path.join(out, still),
+        title,
+        ...(trimmed ? { note: "The clip keeps only the last seven seconds; the first steps are not in it." } : {}),
+      })),
     };
+    return failed.length ? { failed, status: "step_failed", ...report } : { status: "filmed", ...report };
   } catch (error) {
     if (/ffmpeg/i.test(String(error && error.message))) {
       return { status: "needs_setup", next_step: "Run this script once with --setup, then film again." };
     }
-    if (error.report) return { error: error.message, status: "step_failed", ...error.report };
+    if (error.report) return { error: error.message, failed: [{ error: error.message, ...error.report }], status: "step_failed" };
     throw error;
   } finally {
+    fs.rmSync(path.join(out, "rec"), { recursive: true, force: true });
+    fs.rmSync(path.join(out, "state.json"), { force: true });
+    await browser.close();
+  }
+}
+
+async function look(args) {
+  const out = path.resolve(String(args.out || ".vibeworks-film"));
+  const plan = readPlan(path.resolve(String(args.plan || path.join(out, "plan.json"))), true);
+  const route = typeof args.path === "string" ? args.path : "/";
+  if (!route.startsWith("/")) throw new Error('--path must start with "/"');
+  fs.mkdirSync(out, { recursive: true });
+  fs.writeFileSync(path.join(out, ".gitignore"), "*\n");
+  const playwright = loadPlaywright();
+  if (!playwright) return { status: "needs_setup", next_step: "Run this script once with --setup, then look again." };
+  let browser;
+  try {
+    browser = await launch(playwright);
+  } catch (error) {
+    return { status: "needs_setup", next_step: "Run this script once with --setup, then look again.", tried: error.tried };
+  }
+  try {
+    const state = await prepare(browser, plan, out);
+    const context = await newContext(browser, plan, { storageState: state || undefined });
+    const page = await context.newPage();
+    await open(page, plan.base + route);
+    const picture = path.join(out, "look.png");
+    await page.screenshot({ path: picture, fullPage: true });
+    const seen = await onPage(page);
+    await context.close();
+    return { on_page: seen, picture, status: "looked" };
+  } catch (error) {
+    if (error.report) return { error: error.message, failed: [{ error: error.message, ...error.report }], status: "step_failed" };
+    throw error;
+  } finally {
+    fs.rmSync(path.join(out, "state.json"), { force: true });
     await browser.close();
   }
 }
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.clean) {
+    const out = path.resolve(String(args.out || ".vibeworks-film"));
+    if (path.basename(out) !== ".vibeworks-film") throw new Error("--clean only removes a folder named .vibeworks-film");
+    fs.rmSync(out, { recursive: true, force: true });
+    console.log(JSON.stringify({ status: "cleaned" }));
+    return;
+  }
   if (args.setup) {
     const cli = setup();
     const browser = await setupBrowser(cli);
     console.log(JSON.stringify({ browser, home: filmHome(), status: "ready" }));
     return;
   }
-  const outcome = await film(args);
+  const outcome = args.look ? await look(args) : await film(args);
   console.log(JSON.stringify(outcome));
-  process.exit(outcome.status === "filmed" ? 0 : 1);
+  process.exit(["filmed", "looked"].includes(outcome.status) ? 0 : 1);
 }
 
 if (require.main === module) {

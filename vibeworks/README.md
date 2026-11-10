@@ -1,6 +1,6 @@
 # VibeWorks for Claude Code
 
-One plugin that adds the VibeWorks connector to Claude Code, reports each session's counts and timings to your VibeWorks profile, and gives you two commands.
+One plugin that adds the VibeWorks connector to Claude Code, reports each session's counts and timings to your VibeWorks profile, and gives you its commands.
 
 ## What it sends
 
@@ -22,9 +22,17 @@ When VibeWorks offers reads as you connect and you say yes, the plugin also read
 
 Nothing is sent until you connect. Delete `~/.claude/vibeworks/token.json` to stop.
 
+## Upload a project, in one ask
+
+Say "Hey VibeWorks, upload this" or run `/vibeworks:upload` in the project's folder. Claude Code reads the project and writes its page, starts the app on your machine with made up sample data, films three to six short shots of it in use, shows you the words and the pictures, and asks once. On yes it sends the page, the build story, and the shots. VibeWorks cuts the clips and makes the page's video from them.
+
+No password is asked for and your live site is not touched. What leaves the machine, all shown to you first: the page's words, the build story (your opening brief in your own words and short notes on the moments you stepped in), pictures and short recordings of the sample data, and the repository's counts and dates. Never code or file contents.
+
+The first time, filming installs a small browser driver and uses the Chrome already on your machine. Claude Code may ask you to approve a few commands as it starts and fills the local copy.
+
 ## Screenshots, when you ask
 
-Say "send screenshots to VibeWorks" or run `/vibeworks:screens`. Claude Code photographs the app running on your machine with whatever browser tool it has, writes a title and a line for each picture, shows you the list, and sends only those pictures and words to your project page. They land on a draft page at once and wait as suggestions on a published page. Nothing else from your machine goes with them.
+Say "send screenshots to VibeWorks" or run `/vibeworks:screens`. Claude Code fills a local copy of the app with made up sample data, photographs it with whatever browser tool it has, writes a title and a line for each picture, shows you the list, and sends only those pictures and words to your project page. They land on a draft page at once and wait as suggestions on a published page. Nothing else from your machine goes with them.
 
 ## Install
 
@@ -46,7 +54,8 @@ Then, inside Claude Code:
 1. `/mcp`, pick VibeWorks, and sign in.
 2. `/vibeworks:connect` and say yes when it shows you the file it will write.
 3. `/vibeworks:menu` any time to see what else you can do.
-4. `/vibeworks:screens` to send real screenshots of the app to your project page.
+4. `/vibeworks:upload` in a project folder to put it on VibeWorks, clips and all.
+5. `/vibeworks:screens` to send only screenshots of the app to your project page.
 
 ## Test the reporter
 
