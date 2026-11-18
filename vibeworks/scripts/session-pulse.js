@@ -1,7 +1,4 @@
 #!/usr/bin/env node
-// Reads this session's transcript file and sends VibeWorks its counts and
-// timings. Never the text. Runs after every reply; exits quietly whenever
-// anything is missing, so it can never get in the way of a session.
 "use strict";
 
 const fs = require("node:fs");
@@ -10,7 +7,7 @@ const os = require("node:os");
 const crypto = require("node:crypto");
 const { execFileSync, spawn } = require("node:child_process");
 
-const HOOK_VERSION = 1;
+const HOOK_VERSION = 2;
 const IDLE_SECONDS = 600;
 const SEND_TIMEOUT_MS = 5000;
 const READ_TIMEOUT_MS = 10 * 60 * 1000;
@@ -18,6 +15,10 @@ const READ_MIN_PROMPTS = 3;
 const TURN_CAP_CHARS = 4000;
 const CONVERSATION_CAP_CHARS = 60000;
 const READ_MARKER = "<conversation_to_analyze";
+const EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
+const SCHEDULE_TOOLS = ["CronCreate", "CronDelete", "CronList", "ScheduleWakeup"];
+const MAX_PROJECTS_SCANNED = 500;
+const MAX_INSTRUCTION_BYTES = 2 * 1024 * 1024;
 
 const CONNECTOR_KINDS = {
   analytics: ["amplitude", "mixpanel", "pendo", "posthog", "similarweb", "ga4", "google-analytics"],
@@ -78,6 +79,7 @@ function main() {
     permission_mode: input.permission_mode ? String(input.permission_mode) : null,
     cwd_hash: input.cwd ? sha256(String(input.cwd)) : null,
     repository: input.cwd ? repositoryName(String(input.cwd)) : null,
+    setup: setupFacts(input.cwd ? String(input.cwd) : null),
   };
 
   if (!changedSinceLastSend(link.stampDir, pulse)) return;
@@ -324,7 +326,27 @@ function rememberRead(readStampDir, sessionId, status) {
 
 function sessionFacts(lines) {
   const prompts = [];
-  const tools = { agent: 0, connector: 0, edit: 0, other: 0, plan: 0, question: 0, read: 0, shell: 0, skill: 0, web: 0 };
+  const tools = {
+    agent: 0,
+    connector: 0,
+    edit: 0,
+    other: 0,
+    plan: 0,
+    plan_mode: 0,
+    question: 0,
+    read: 0,
+    schedule: 0,
+    search: 0,
+    shell: 0,
+    skill: 0,
+    web: 0,
+    worktree: 0,
+  };
+  const branches = new Set();
+  let backgroundJobs = 0;
+  let imagesPasted = 0;
+  let plansWritten = 0;
+  let effortRank = -1;
   const connectorKinds = {};
   const connectorCalls = {};
   const connectorServers = new Set();
@@ -348,9 +370,13 @@ function sessionFacts(lines) {
     if (typeof line.version === "string" && !claudeVersion) claudeVersion = line.version;
     if (line.isCompactSummary === true || line.type === "summary") compactionCount += 1;
     if (line.isSidechain === true) continue;
+    if (typeof line.gitBranch === "string" && line.gitBranch !== "" && line.gitBranch !== "HEAD") branches.add(line.gitBranch);
 
     if (line.type === "user" && line.isMeta !== true) {
       const content = line.message && line.message.content;
+      if (Array.isArray(content) && !content.some((block) => block && block.type === "tool_result")) {
+        imagesPasted += content.filter((block) => block && block.type === "image").length;
+      }
       const text = promptText(content);
       if (text === null) continue;
       if (text.includes("<command-name>")) commandCount += 1;
@@ -362,11 +388,14 @@ function sessionFacts(lines) {
     if (line.type === "assistant") {
       const message = line.message || {};
       if (typeof message.model === "string" && !model) model = message.model;
+      effortRank = Math.max(effortRank, EFFORT_LEVELS.indexOf(line.effort));
       if (prompts.length > 0 && at) prompts[prompts.length - 1].until = at;
       for (const block of Array.isArray(message.content) ? message.content : []) {
         if (!block || block.type !== "tool_use" || typeof block.name !== "string") continue;
         const kind = toolKind(block.name);
         tools[kind] += 1;
+        if (block.input && block.input.run_in_background === true) backgroundJobs += 1;
+        if (block.name === "ExitPlanMode") plansWritten += 1;
         if (kind === "connector") {
           const server = connectorServer(block.name);
           if (server && !SKIPPED_SERVERS.includes(server)) {
@@ -403,11 +432,18 @@ function sessionFacts(lines) {
     compaction_count: compactionCount,
     model,
     claude_version: claudeVersion,
+    effort: effortRank >= 0 ? EFFORT_LEVELS[effortRank] : null,
+    estimated_seconds_user: clock.userSeconds,
+    estimated_seconds_cli: clock.cliSeconds,
+    habits: {
+      background_jobs: backgroundJobs,
+      branches: branches.size,
+      images_pasted: imagesPasted,
+      plans_written: plansWritten,
+    },
   };
 }
 
-// A prompt the person typed: a plain string, or a text block with no tool
-// result beside it. Anything else is Claude Code talking to itself.
 function promptText(content) {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
@@ -435,8 +471,17 @@ function toolKind(name) {
     case "Monitor":
       return "shell";
     case "WebFetch":
-    case "WebSearch":
       return "web";
+    case "WebSearch":
+      return "search";
+    case "EnterWorktree":
+    case "ExitWorktree":
+      return "worktree";
+    case "CronCreate":
+    case "CronDelete":
+    case "CronList":
+    case "ScheduleWakeup":
+      return "schedule";
     case "Skill":
       return "skill";
     case "Agent":
@@ -446,6 +491,7 @@ function toolKind(name) {
       return "question";
     case "EnterPlanMode":
     case "ExitPlanMode":
+      return "plan_mode";
     case "TodoWrite":
     case "TaskCreate":
     case "TaskUpdate":
@@ -476,21 +522,123 @@ function connectorCategory(server) {
   return "other";
 }
 
-// Active time is Claude replying plus the short pauses between replies; a
-// pause longer than ten minutes is a break, not work. Same rule VibeWorks
-// applies to build stories.
 function activeClock(prompts) {
-  let seconds = 0;
+  let userSeconds = 0;
+  let cliSeconds = 0;
   let cursor = prompts[0].at;
   for (const { at, until } of prompts) {
     const pause = (at - cursor) / 1000;
-    if (pause > 0 && pause <= IDLE_SECONDS) seconds += pause;
+    if (pause > 0 && pause <= IDLE_SECONDS) userSeconds += pause;
     const started = cursor > at ? cursor : at;
-    const worked = Math.max((until - started) / 1000, 0);
-    seconds += worked;
+    cliSeconds += Math.max((until - started) / 1000, 0);
     if (until > cursor) cursor = until;
   }
-  return { activeMinutes: Math.round(seconds / 60), endedAt: cursor };
+  return {
+    activeMinutes: Math.round((userSeconds + cliSeconds) / 60),
+    cliSeconds: Math.round(cliSeconds),
+    endedAt: cursor,
+    userSeconds: Math.round(userSeconds),
+  };
+}
+
+function readJson(file) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function isFile(file) {
+  try {
+    return fs.statSync(file).isFile();
+  } catch (_error) {
+    return false;
+  }
+}
+
+function listDir(dir) {
+  try {
+    return fs.readdirSync(dir, { withFileTypes: true });
+  } catch (_error) {
+    return [];
+  }
+}
+
+function wordCount(file) {
+  try {
+    if (fs.statSync(file).size > MAX_INSTRUCTION_BYTES) return 0;
+    return fs.readFileSync(file, "utf8").split(/\s+/).filter(Boolean).length;
+  } catch (_error) {
+    return 0;
+  }
+}
+
+function serverNames(config) {
+  const servers = config && config.mcpServers;
+  if (!servers || typeof servers !== "object") return [];
+  return Object.keys(servers).filter((name) => !SKIPPED_SERVERS.includes(name.toLowerCase()));
+}
+
+function setupFacts(cwd) {
+  const dir = configDir();
+  const claudeJson = readJson(
+    process.env.CLAUDE_CONFIG_DIR ? path.join(dir, ".claude.json") : path.join(os.homedir(), ".claude.json")
+  );
+  const settings = [path.join(dir, "settings.json")]
+    .concat(cwd ? [path.join(cwd, ".claude", "settings.json"), path.join(cwd, ".claude", "settings.local.json")] : [])
+    .map(readJson)
+    .filter(Boolean);
+
+  const permissionRules = settings
+    .map((file) => file.permissions || {})
+    .flatMap((permissions) => ["allow", "ask", "deny"].map((kind) => (Array.isArray(permissions[kind]) ? permissions[kind].length : 0)))
+    .reduce((sum, count) => sum + count, 0);
+
+  const hookEvents = new Set(
+    settings.flatMap((file) => (file.hooks && typeof file.hooks === "object" ? Object.keys(file.hooks) : []))
+  );
+
+  const projectEntry = claudeJson && claudeJson.projects && cwd ? claudeJson.projects[cwd] : null;
+  const mcpServers = new Set([
+    ...serverNames(claudeJson),
+    ...serverNames(projectEntry),
+    ...(cwd ? serverNames(readJson(path.join(cwd, ".mcp.json"))) : []),
+  ]);
+
+  const instructionFiles = [path.join(dir, "CLAUDE.md")]
+    .concat(cwd ? [path.join(cwd, "CLAUDE.md"), path.join(cwd, "CLAUDE.local.md"), path.join(cwd, ".claude", "CLAUDE.md")] : [])
+    .filter(isFile);
+
+  const agentsWritten = [path.join(dir, "agents")]
+    .concat(cwd ? [path.join(cwd, ".claude", "agents")] : [])
+    .flatMap(listDir)
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".md")).length;
+
+  const projectsWithMemory = listDir(path.join(dir, "projects")).filter(
+    (entry) => entry.isDirectory() && listDir(path.join(dir, "projects", entry.name, "memory")).length > 0
+  ).length;
+
+  const facts = {
+    agents_written: agentsWritten,
+    hook_events: hookEvents.size,
+    instruction_files: instructionFiles.length,
+    instruction_words: instructionFiles.map(wordCount).reduce((sum, count) => sum + count, 0),
+    mcp_servers: mcpServers.size,
+    permission_rules: permissionRules,
+    projects_with_memory: projectsWithMemory,
+  };
+
+  if (claudeJson && claudeJson.projects && typeof claudeJson.projects === "object") {
+    const paths = Object.keys(claudeJson.projects).slice(0, MAX_PROJECTS_SCANNED);
+    facts.projects = paths.length;
+    facts.projects_with_instruction_file = paths.filter(
+      (folder) => isFile(path.join(folder, "CLAUDE.md")) || isFile(path.join(folder, ".claude", "CLAUDE.md"))
+    ).length;
+  }
+
+  return facts;
 }
 
 function parseTime(value) {
@@ -538,7 +686,6 @@ function rememberSend(stampDir, pulse) {
       JSON.stringify({ last_at: pulse.last_at, prompt_count: pulse.prompt_count, tool_calls: pulse.tool_calls })
     );
   } catch (_error) {
-    // A missing stamp only means one extra send next time.
   }
 }
 
@@ -572,4 +719,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { sessionFacts, toolKind, connectorServer, connectorCategory, activeClock, readLink, readSession, renderConversation, parseAnswer };
+module.exports = { sessionFacts, setupFacts, toolKind, connectorServer, connectorCategory, activeClock, readLink, readSession, renderConversation, parseAnswer };

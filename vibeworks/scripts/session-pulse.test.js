@@ -8,7 +8,7 @@ const path = require("node:path");
 const http = require("node:http");
 const { execFile, execFileSync } = require("node:child_process");
 
-const { sessionFacts, toolKind, connectorServer, connectorCategory } = require("./session-pulse.js");
+const { sessionFacts, setupFacts, toolKind, connectorServer, connectorCategory } = require("./session-pulse.js");
 
 const SCRIPT = path.join(__dirname, "session-pulse.js");
 
@@ -42,7 +42,22 @@ test("reads counts, kinds and the clock off a transcript, and nothing else", () 
   assert.equal(facts.last_at, "2026-10-18T09:31:30.000Z");
   assert.equal(facts.active_minutes, 5, "the 26 minute pause before the second prompt is a break, not work");
   assert.equal(facts.tool_calls, 12);
-  assert.deepEqual(facts.tools, { agent: 1, connector: 4, edit: 1, other: 0, plan: 0, question: 1, read: 2, shell: 2, skill: 1, web: 0 });
+  assert.deepEqual(facts.tools, {
+    agent: 1,
+    connector: 4,
+    edit: 1,
+    other: 0,
+    plan: 0,
+    plan_mode: 0,
+    question: 1,
+    read: 2,
+    schedule: 0,
+    search: 0,
+    shell: 2,
+    skill: 1,
+    web: 0,
+    worktree: 0,
+  });
   assert.deepEqual(facts.connector_kinds, { chat: 1, code: 1 }, "github once, slack once, VibeWorks itself skipped");
   assert.deepEqual(facts.connector_calls, { github: 2, slack: 1 }, "calls counted per connector by name, VibeWorks itself skipped");
   assert.equal(facts.skill_count, 1);
@@ -59,7 +74,14 @@ test("a transcript with no prompt yet reports nothing", () => {
 
 test("tool names fall into kinds and connector servers into categories", () => {
   assert.equal(toolKind("Write"), "edit");
-  assert.equal(toolKind("WebSearch"), "web");
+  assert.equal(toolKind("WebFetch"), "web");
+  assert.equal(toolKind("WebSearch"), "search", "searching the web is counted apart from fetching a page");
+  assert.equal(toolKind("EnterPlanMode"), "plan_mode");
+  assert.equal(toolKind("ExitPlanMode"), "plan_mode");
+  assert.equal(toolKind("TodoWrite"), "plan", "a to-do list is planning, not plan mode");
+  assert.equal(toolKind("TaskCreate"), "plan");
+  assert.equal(toolKind("EnterWorktree"), "worktree");
+  assert.equal(toolKind("CronCreate"), "schedule");
   assert.equal(toolKind("Task"), "agent");
   assert.equal(toolKind("SomethingNew"), "other");
   assert.equal(connectorServer("mcp__notion__search"), "notion");
@@ -106,7 +128,8 @@ test("sends the facts to VibeWorks with the token, then stays quiet until someth
   assert.equal(received[0].authorization, "Bearer vwcc_test");
   assert.equal(received[0].body.session_id, "sess-1");
   assert.equal(received[0].body.prompt_count, 2);
-  assert.equal(received[0].body.hook_version, 1);
+  assert.equal(received[0].body.hook_version, 2, "the version tells the server this pulse carries the newer counts");
+  assert.equal(typeof received[0].body.setup, "object");
   assert.equal(received[0].body.permission_mode, "default");
   assert.match(received[0].body.cwd_hash, /^[0-9a-f]{64}$/);
 
@@ -303,4 +326,72 @@ test("the backfill lists only session files from the last month", () => {
   const old = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
   fs.utimesSync(stale, old, old);
   assert.deepEqual(sessionFiles(dir, Date.now() - 30 * 24 * 60 * 60 * 1000), [fresh]);
+});
+
+test("counts habits, effort and the hands on split without sending any names", () => {
+  const lines = [
+    line({ type: "user", timestamp: "2026-11-01T09:00:00.000Z", gitBranch: "feature/secret-launch", message: { role: "user", content: [{ type: "text", text: "Fix this" }, { type: "image", source: {} }, { type: "image", source: {} }] } }),
+    line({ type: "assistant", timestamp: "2026-11-01T09:01:00.000Z", effort: "high", gitBranch: "feature/secret-launch", message: { role: "assistant", content: [{ type: "tool_use", name: "EnterPlanMode", input: {} }, { type: "tool_use", name: "Bash", input: { command: "npm run dev", run_in_background: true } }, { type: "tool_use", name: "WebSearch", input: {} }, { type: "tool_use", name: "ExitPlanMode", input: {} }, { type: "tool_use", name: "TodoWrite", input: {} }, { type: "tool_use", name: "EnterWorktree", input: {} }, { type: "tool_use", name: "CronCreate", input: {} }] } }),
+    line({ type: "user", timestamp: "2026-11-01T09:01:30.000Z", message: { role: "user", content: [{ type: "tool_result", content: [{ type: "image" }] }] } }),
+    line({ type: "user", timestamp: "2026-11-01T09:02:00.000Z", gitBranch: "main", message: { role: "user", content: "Ship it" } }),
+    line({ type: "assistant", timestamp: "2026-11-01T09:03:00.000Z", effort: "max", gitBranch: "HEAD", message: { role: "assistant", content: [{ type: "text", text: "Done" }] } }),
+  ];
+
+  const facts = sessionFacts(lines);
+
+  assert.equal(facts.tools.plan_mode, 2);
+  assert.equal(facts.tools.plan, 1);
+  assert.equal(facts.tools.search, 1);
+  assert.equal(facts.tools.worktree, 1);
+  assert.equal(facts.tools.schedule, 1);
+  assert.deepEqual(facts.habits, { background_jobs: 1, branches: 2, images_pasted: 2, plans_written: 1 });
+  assert.equal(facts.effort, "max", "the highest effort level seen in the session");
+  assert.equal(facts.estimated_seconds_cli, 120, "Claude replied for a minute after each prompt");
+  assert.equal(facts.estimated_seconds_user, 60, "the person took a minute between the first reply and the next prompt");
+  assert.equal(facts.active_minutes, 3);
+  assert.equal(JSON.stringify(facts).includes("secret-launch"), false, "no branch name leaves the machine");
+  assert.equal(JSON.stringify(facts).includes("npm run dev"), false);
+});
+
+test("counts the setup on this machine and never reads out names, rules or words", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "vibeworks-setup-"));
+  const config = path.join(home, "config");
+  const app = path.join(home, "app");
+  const other = path.join(home, "other");
+  fs.mkdirSync(path.join(config, "agents"), { recursive: true });
+  fs.mkdirSync(path.join(config, "projects", "-one", "memory"), { recursive: true });
+  fs.mkdirSync(path.join(config, "projects", "-two"), { recursive: true });
+  fs.mkdirSync(path.join(app, ".claude", "agents"), { recursive: true });
+  fs.mkdirSync(other, { recursive: true });
+  fs.writeFileSync(path.join(config, "CLAUDE.md"), "one two three");
+  fs.writeFileSync(path.join(config, "agents", "reviewer.md"), "x");
+  fs.writeFileSync(path.join(config, "projects", "-one", "memory", "MEMORY.md"), "x");
+  fs.writeFileSync(path.join(app, "CLAUDE.md"), "four five");
+  fs.writeFileSync(path.join(app, ".claude", "agents", "planner.md"), "x");
+  fs.writeFileSync(path.join(app, ".claude", "settings.json"), JSON.stringify({ permissions: { allow: ["Bash(rm -rf secret)", "Read"], deny: ["Edit"] }, hooks: { PostToolUse: [], Stop: [] } }));
+  fs.writeFileSync(path.join(app, ".mcp.json"), JSON.stringify({ mcpServers: { notion: {}, vibeworks: {} } }));
+  fs.writeFileSync(path.join(config, ".claude.json"), JSON.stringify({ mcpServers: { github: {}, notion: {} }, projects: { [app]: {}, [other]: {} } }));
+
+  const previous = process.env.CLAUDE_CONFIG_DIR;
+  process.env.CLAUDE_CONFIG_DIR = config;
+  let facts;
+  try {
+    facts = setupFacts(app);
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = previous;
+  }
+
+  assert.deepEqual(facts, {
+    agents_written: 2,
+    hook_events: 2,
+    instruction_files: 2,
+    instruction_words: 5,
+    mcp_servers: 2,
+    permission_rules: 3,
+    projects: 2,
+    projects_with_instruction_file: 1,
+    projects_with_memory: 1,
+  });
+  assert.equal(JSON.stringify(facts).includes("secret"), false, "no permission rule text leaves the machine");
 });

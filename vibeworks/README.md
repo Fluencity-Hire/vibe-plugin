@@ -8,11 +8,15 @@ After every reply, and once more when a session ends, the plugin reads the sessi
 
 - when the session started and the last time it was active, and the minutes you were actually working
 - how many prompts you typed and how many were slash commands
-- how many tool calls Claude made, by kind: reading, editing, shell, web, skill, subagent, connector, planning, questions
+- how many tool calls Claude made, by kind: reading, editing, shell, web pages, web searches, skill, subagent, connector, to-do lists, plan mode, scheduled jobs, worktrees, questions
 - which connectors were used, by name, and how many times each was called, plus the kind each one is (code, chat, documents, and so on)
 - how many skills and subagents ran, and how often the context was compacted
+- how many commands ran in the background, how many pictures you pasted, how many plans Claude finished writing, and how many different branches the session touched (a count, never a branch name)
+- the highest effort level Claude used (low, medium, high, xhigh or max)
+- an estimate of the seconds Claude worked alone and the seconds you were hands on, from message times
 - the model, the Claude Code version, the permission mode
 - the repository as owner/name when the folder is a GitHub repository, and a hash of the folder path
+- counts about your setup, read from files on your machine: instruction files (CLAUDE.md) and their total words, permission rules, MCP servers, hook events, subagent files you wrote, projects with memory, how many Claude Code projects you have, and how many of them have an instruction file. Numbers only. No rule text, no server or hook names, no file contents, no folder names
 
 It never sends prompts, replies, code, file names, or anything you or Claude wrote.
 
