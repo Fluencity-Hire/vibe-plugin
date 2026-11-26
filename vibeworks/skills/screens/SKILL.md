@@ -12,11 +12,11 @@ Take real screenshots of the app running here and send them to the person's Vibe
    If you have no browser tool, ask the person to take the screenshots themselves into that folder and tell you what each one shows.
 5. For each picture write a title of two to six plain words and one plain sentence saying what a person does on that screen. No hype words. Write `screens.json` in the folder: a list of `{"file": "name.png", "title": "...", "caption": "...", "frame": "browser"}`. Use `"frame": "phone"` for a picture taken at phone width.
 6. Show the person the pictures, titles and captions and ask once whether to send them. Say that only these pictures and these words are sent, nothing else from the machine.
-7. On yes, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/send-screens.js" --dir .vibeworks-screens --project <slug>`. Use the project's slug from the VibeWorks tool `list_projects` when you know which project this folder is; otherwise pass the repository as owner/name and the server matches it. If `${CLAUDE_PLUGIN_ROOT}` is not set, the script lives in the `scripts` folder of this plugin, beside the `skills` folder this file is in.
+7. On yes, run `node "${CLAUDE_PLUGIN_ROOT}/scripts/send-screens.js" --dir .vibeworks-screens --project <slug>`. Use the project's slug from the VibeWorks tool `find` with kind `projects` when you know which project this folder is; otherwise pass the repository as owner/name and the server matches it. If `${CLAUDE_PLUGIN_ROOT}` is not set, the script lives in the `scripts` folder of this plugin, beside the `skills` folder this file is in.
 8. Read the JSON the script prints and tell the person what happened:
    - `sent`: how many landed and the editor link in `editor_url`. On a draft page they are on the page at once; on a published page they wait as suggestions until the person adds them.
    - `needs_choice`: more than one project has that repository. Ask which one, then run again with its slug.
    - `not_connected`: run the connect skill first, then send again.
-   - `no_project`: there is no VibeWorks project for this folder yet. Offer to make one with `create_project`, then send again.
+   - `no_project`: there is no VibeWorks project for this folder yet. Offer to make one with `execute` with kind `project`, then send again.
    - `refused` with `rate_limited`: several sends in the last hour. Try again later.
 9. Delete the `.vibeworks-screens` folder unless the person wants to keep it.

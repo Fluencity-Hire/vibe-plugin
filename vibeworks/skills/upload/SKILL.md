@@ -1,7 +1,7 @@
 ---
 name: upload
 description: "Put the project in this folder on the person's VibeWorks in one go: its page, how it was built, and short clips of the app in use that become its video. Use when they say upload, send, add, save, put or publish this (project) to VibeWorks or to my VibeWorks, with or without Hey VibeWorks in front, ask to update this project in VibeWorks, or pick sending or updating a project from the Hey VibeWorks menu."
-allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/film.js *), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/send-screens.js *), Write(.vibeworks-film/**), mcp__plugin_vibeworks_vibeworks__list_projects, mcp__plugin_vibeworks_vibeworks__create_project, mcp__plugin_vibeworks_vibeworks__update_project, mcp__plugin_vibeworks_vibeworks__save_build_story
+allowed-tools: Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/film.js *), Bash(node ${CLAUDE_PLUGIN_ROOT}/scripts/send-screens.js *), Write(.vibeworks-film/**), mcp__plugin_vibeworks_vibeworks__find, mcp__plugin_vibeworks_vibeworks__execute
 ---
 
 The person asks once and says yes once. Everything else is your work: read the project, write its page, film the app on this machine with sample data, and send it all. Find out what you can from the folder instead of asking. Never ask for a password, and never use the person's own sign in. While this skill runs it replaces what the VibeWorks tools say about asking for a live link, a test account, or a yes for each field: the one question in step 4 covers them all.
@@ -10,11 +10,13 @@ VibeWorks makes a short video for the page from what you send. A video of real c
 
 Start with one line to the person: you will read the project, run it here with sample data and film it, and Claude Code may ask them to approve a few commands along the way.
 
-If the VibeWorks tools (`list_projects`, `create_project`) are not available, tell the person to run `/mcp`, pick the VibeWorks server (it may be listed as `plugin:vibeworks:vibeworks`) and sign in, then carry on.
+Every VibeWorks call sends a `kind` and a `params` object, and the fields named below go inside `params`.
+
+If the VibeWorks tools `find` and `execute` are not available, tell the person to run `/mcp`, pick the VibeWorks server (it may be listed as `plugin:vibeworks:vibeworks`) and sign in, then carry on.
 
 ## 1. Find the page
 
-Call `list_projects`. Match this folder to a page by its git remote (owner/name) first, then by name.
+Call `find` with kind `projects`. Match this folder to a page by its git remote (owner/name) first, then by name.
 
 - One page matches by repository: you will update it, and say so in step 4.
 - No page matches: you will make a new one.
@@ -30,9 +32,9 @@ Read the README, the manifest (package.json and the like), the main screens and 
 - `tools`: only what you saw in the code or config
 - `steps`: how it works now, in order, up to 8
 - `live_url`: only when the repository says where it runs (README, deploy config) and anyone can open it. Leave it out for an app behind a sign in unless the person asks. Do not ask for it.
-- `repository`: the facts `create_project` describes, read with the git commands it gives. If the clone is shallow (`git rev-parse --is-shallow-repository` says true), leave the counts out; they would be wrong.
+- `repository`: the facts `execute` with kind `project` describes, read with the git commands it gives. If the clone is shallow (`git rev-parse --is-shallow-repository` says true), leave the counts out; they would be wrong.
 
-Leave out anything you would have to guess. A folder with no README often keeps its story in CLAUDE.md or a docs file. When the folder holds more than one app, the page is for the one the person means; if that is not plain, it is the one question you may ask in step 1. When the folder has a git repository, also draft what `save_build_story` asks for, as its own description says, so the person sees it before anything is sent.
+Leave out anything you would have to guess. A folder with no README often keeps its story in CLAUDE.md or a docs file. When the folder holds more than one app, the page is for the one the person means; if that is not plain, it is the one question you may ask in step 1. When the folder has a git repository, also draft what `execute` with kind `build_story` asks for, as its own description says, so the person sees it before anything is sent.
 
 ## 3. Film the app here, on sample data
 
@@ -139,8 +141,8 @@ Ask one question: send this to VibeWorks? Change what they ask you to change. Se
 
 ## 5. Send
 
-1. Call `update_project` for an existing page or `create_project` for a new one, with what you drafted, `platform` set to `claude-code`, and the `repository` facts. If the reply says `needs_choice`, ask which page and call again.
-2. When the folder has a git repository, call `save_build_story` with what you showed.
+1. Call `execute` with kind `project`, with the page's slug in `project` for an existing page or without it for a new one, with what you drafted, `platform` set to `claude-code`, and the `repository` facts. If the reply says `needs_choice`, ask which page and call again.
+2. When the folder has a git repository, call `execute` with kind `build_story` with what you showed.
 3. Send the film with the `screens_upload` the reply in step 1 carried. Its `pass` goes on the command and nowhere else: never into a file, and do not repeat it in your messages.
 
 ```
@@ -150,7 +152,7 @@ node ${CLAUDE_PLUGIN_ROOT}/scripts/send-screens.js --dir .vibeworks-film --url <
 If the reply in step 1 has no `screens_upload`, say the page is saved without clips and stop there. Otherwise read the JSON the script prints:
 
 - `sent`: `clips` says how many clips landed. `video` is `started` (a video is being made now), `waiting` (several videos were made this hour; they can ask for one on the page later) or `none`.
-- `refused` with `pass_expired`: the pass is over thirty minutes old. Call `update_project` with the project and `platform` `claude-code` to get a new one, then send again.
+- `refused` with `pass_expired`: the pass is over thirty minutes old. Call `execute` with kind `project` with the project and `platform` `claude-code` to get a new one, then send again.
 - `refused` with `video_rendering`: a video is being made from the shots already on the page. Tell the person to send again when it is done.
 - `refused` with `rate_limited`: several sends in the last hour. Try later.
 

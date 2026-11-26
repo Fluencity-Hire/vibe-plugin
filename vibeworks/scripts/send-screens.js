@@ -183,7 +183,7 @@ async function main() {
     console.log(
       JSON.stringify({
         status: "not_connected",
-        next_step: "Save the page with create_project or update_project to get an upload pass, or run /vibeworks:connect.",
+        next_step: "Save the page with execute with kind project to get an upload pass, or run /vibeworks:connect.",
       }),
     );
     process.exit(1);

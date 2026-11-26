@@ -5,7 +5,7 @@ description: Connect the VibeWorks plugin so each Claude Code session reports it
 
 Connect this machine's VibeWorks plugin.
 
-1. Call the VibeWorks tool `connect_claude_code`. If the VibeWorks server is not signed in yet, tell the person to run `/mcp`, pick VibeWorks, and sign in, then try again.
+1. Call the VibeWorks tool `execute` with kind `claude_code_connection` and params `{}`. If the VibeWorks server is not signed in yet, tell the person to run `/mcp`, pick VibeWorks, and sign in, then try again.
 2. Show the person what the reply says will be written: a small file at `~/.claude/vibeworks/token.json` holding a token and the VibeWorks address. Say plainly what the plugin sends from then on: for each session, counts and timings only. Prompt count, tool calls by kind, which connectors were called and how often, skills, subagents, minutes, model, and the repository name when the folder is a git repository. Never prompts, replies, code, or file names.
 3. After they say yes, run the `shell_command` from the reply exactly as given. Never print the token anywhere else, and never put it in a file they might commit.
 4. Confirm it is done, and tell them the report arrives after their next reply. They can disconnect any time by deleting that file.
